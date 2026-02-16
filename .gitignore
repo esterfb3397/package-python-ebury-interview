@@ -5,6 +5,14 @@ logs/
 dbt/target/
 dbt/dbt_packages/
 dbt/logs/
+dbt/.user.yml
+dbt/dbt.log
+
+# Internal working files
+CLAUDE.md
+roadmap.txt
+how_to_deploy.txt
+NOTAS_TECNICAS.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

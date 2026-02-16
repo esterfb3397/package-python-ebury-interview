@@ -1,47 +1,148 @@
-# package-python-ebury-interview
+# Customer Transactions Pipeline
 
-## Requisitos previos
+End-to-end data pipeline that ingests raw transaction data from CSV, cleans and transforms it into a dimensional model using dbt, and orchestrates everything with Apache Airflow.
 
-- **Docker Engine** con al menos 4 GB de RAM asignados (recomendado 8 GB).
-- **Docker Compose v2.14.0** o superior.
-- Al menos **2 CPUs** y **10 GB de disco** disponibles.
+## Prerequisites
 
-## Inicio rapido
+- **Docker Engine** with at least 4 GB of RAM allocated (8 GB recommended).
+- **Docker Compose v2.14.0** or higher.
+- At least **2 CPUs** and **10 GB of free disk space**.
+
+## Quick start
 
 ```bash
-# 1. Crear el fichero de entorno a partir del ejemplo
+# 1. Create the environment file from the template
 cp .env.example .env
 
-# 2. (Solo Linux) Establecer el UID del usuario del host
+# 2. (Linux only) Set the host user UID
 echo "AIRFLOW_UID=$(id -u)" >> .env
 
-# 3. Inicializar la base de datos y crear el usuario administrador
+# 3. Initialise the database and create the admin user
 docker compose up airflow-init
 
-# 4. Arrancar todos los servicios
+# 4. Start all services
 docker compose up -d
 
-# 5. Comprobar que los servicios estan sanos
+# 5. Verify services are healthy
 docker compose ps
 
-# 6. Verificar la conexion de dbt
+# 6. Verify dbt connection
 docker compose --profile dbt run --rm dbt debug
 ```
 
-Una vez levantados, los puntos de acceso son:
+Once running, access points are:
 
-| Servicio | URL | Credenciales por defecto |
+| Service | URL | Default credentials |
 |---|---|---|
 | Airflow UI / API | <http://localhost:8080> | `airflow` / `airflow` |
-| Flower (monitoring Celery) | <http://localhost:5555> | -- |
+| Flower (Celery monitoring) | <http://localhost:5555> | -- |
+| PostgreSQL | localhost:5432 | `app` / `changeme` |
 
-> Flower no arranca por defecto. Activalo con `docker compose --profile flower up -d`.
+> Flower does not start by default. Enable it with `docker compose --profile flower up -d`.
 
-## Arquitectura de servicios
+## Pipeline overview
+
+The pipeline is defined as a single Airflow DAG (`customer_transactions_pipeline`) with three sequential tasks:
+
+```bash
+
+ingest_csv_to_postgres  ──▶  dbt_run  ──▶  dbt_test
+
+```
+
+1. **ingest_csv_to_postgres** — Reads `data/customer_transactions.csv`, loads all columns as TEXT into PostgreSQL (`raw_customer_transactions`) using `COPY` for efficiency. Full-refresh (drop + recreate) on every run to guarantee idempotency.
+2. **dbt_run** — Executes all dbt models: staging (cleaning/normalisation), dimensional (dim + fact), and aggregation layers.
+3. **dbt_test** — Runs dbt tests to validate data quality constraints (uniqueness, not-null, referential integrity).
+
+The DAG is configured with `retries=2` and `retry_delay=1min` by default. Schedule is set to `None` (manual trigger) so it can be triggered on-demand or switched to a cron expression for production.
+
+## Data model
+
+### Staging layer
+
+| Model | Description |
+|---|---|
+| `stg_customer_transactions` | Cleans and normalises raw data: strips prefixes (`T`, `P`), casts types, normalises mixed date formats (`YYYY-MM-DD` / `DD-MM-YYYY`), converts text numbers (`"Two Hundred"` → `200`), and handles missing values as NULLs. |
+
+### Dimensional layer
+
+| Model | Type | Description |
+|---|---|---|
+| `dim_table` | Dimension | Deduplicated product catalogue (`product_id`, `product_name`). |
+| `fact_table` | Fact | One row per transaction with calculated metrics: `total_amount = (price * quantity) + tax` and `transaction_month` for monthly aggregation. |
+
+### Aggregation layer
+
+| Model | Description |
+|---|---|
+| `agg_customer_summary` | Customer-level metrics: total transactions, unique products, gross revenue, total tax, total spent, average ticket, first/last purchase date. |
+| `agg_monthly_summary` | Monthly metrics: transaction count, unique customers/products, gross revenue, total tax, total revenue, average ticket. |
+
+### Lineage
+
+```bash
+raw_customer_transactions (source, all TEXT)
+    └── stg_customer_transactions (cleaned, typed)
+            ├── dim_table (product dimension)
+            ├── fact_table (transaction facts)
+            │       ├── agg_customer_summary
+            │       └── agg_monthly_summary
+```
+
+## Data quality
+
+### Approach
+
+Data quality is addressed at multiple levels:
+
+1. **Ingestion** — All columns are loaded as TEXT to preserve the original values without any implicit casting or data loss. This ensures that cleaning decisions are explicit and auditable in dbt.
+
+2. **Staging (dbt)** — The `stg_customer_transactions` model handles every known data issue in the CSV:
+   - **Prefixed IDs**: `T1010` → `1010`, `P100` → `100` (regex strip + cast)
+   - **Float-formatted integers**: `501.0` → `501` (strip `.0` suffix)
+   - **Mixed date formats**: `YYYY-MM-DD` and `DD-MM-YYYY` normalised to `DATE`
+   - **Text-encoded numbers**: `"Two Hundred"` → `200.00`, `"Fifteen"` → `15.00`
+   - **Missing values**: Empty strings → `NULL` (explicit, not implicit via pandas `NaN`)
+
+3. **dbt tests** — Schema-level tests enforce constraints across all layers:
+   - `unique` + `not_null` on primary keys (`transaction_id`, `product_id`, `customer_id`)
+   - `not_null` on critical fields (`transaction_date`, `product_name`, `total_amount`)
+   - `relationships` test on `fact_table.product_id` → `dim_table.product_id` (referential integrity)
+
+4. **Pipeline enforcement** — `dbt_test` runs as the final DAG task. If any test fails, the task (and the DAG run) is marked as failed, preventing silent data corruption.
+
+### Known limitations and future improvements
+
+- Text-to-number mappings (`"Two Hundred"`, `"Fifteen"`) are hardcoded for the known dataset. In production, this should be replaced by a lookup table or a more generic parsing macro.
+- Source freshness (`loaded_at_field`) is not yet configured. Adding it would enable alerting when data becomes stale.
+- Custom singular tests (e.g., `total_amount >= 0`, `transaction_date` within expected range) would add an extra validation layer.
+
+## Data governance
+
+- **Separation of concerns** — Three isolated PostgreSQL databases: `app` (application), `airflow` (orchestration metadata), and `analytics` (dbt warehouse). Each with its own credentials created via `init-db.sh`.
+- **Least privilege** — Dedicated database roles (`airflow`, `dbt`, `app`) with access restricted to their own database.
+- **Secrets management** — All credentials are injected via `.env` (not committed to version control). `.env.example` provides a template with placeholder values.
+- **Data lineage** — dbt natively tracks model dependencies. Run `dbt docs generate && dbt docs serve` to explore the full lineage graph.
+- **Schema contracts** — dbt `schema.yml` files serve as data contracts: they document every column and enforce quality expectations via tests.
+- **Auditability** — Raw data is preserved in `raw_customer_transactions` (all TEXT). Every transformation is explicit in SQL, making changes reviewable via version control.
+
+## Optimisation decisions
+
+| Decision | Rationale |
+|---|---|
+| `COPY` instead of row-by-row `INSERT` | PostgreSQL `COPY` is the fastest bulk-loading method; avoids per-row overhead. |
+| `dtype=str` in pandas `read_csv` | Prevents pandas from guessing types (and silently corrupting data). All casting is deferred to dbt. |
+| `CeleryExecutor` with Valkey | Enables horizontal scaling of workers (`--scale airflow-worker=N`). Valkey is Redis-compatible with BSD license. |
+| `noeviction` memory policy on Valkey | Prevents message loss; broker rejects new tasks instead of silently dropping queued ones. |
+| `materialized='table'` for all dbt models | Full-refresh tables ensure consistency and simplify debugging. Incremental models can be adopted later if volume grows. |
+| Full-refresh ingestion (DROP + CREATE) | Guarantees idempotency: re-running the DAG always produces the same result regardless of prior state. |
+| `DUMB_INIT_SETSID=0` on workers | Enables graceful shutdown: in-flight tasks finish before the container stops. |
+
+## Service architecture
 
 ```
                 ┌───────────────┐
-                │   PostgreSQL  │  Base de datos compartida
+                │   PostgreSQL  │  Shared database instance
                 └──────┬────────┘
                        │
        ┌───────────────┼───────────────┐
@@ -55,7 +156,7 @@ Una vez levantados, los puntos de acceso son:
        │         ┌────────┐            │
        │         │ Valkey  │      ┌────┴─────┐
        │         │ (broker)│      │   dbt    │
-       │         └────┬────┘      │ 1.11.4   │
+       │         └────┬────┘      │  1.9.0   │
        │              │           └──────────┘
  ┌─────▼──────────────▼──────────────────────────┐
  │              Airflow 3.1.7                     │
@@ -68,160 +169,129 @@ Una vez levantados, los puntos de acceso son:
  └────────────────────────────────────────────────┘
 ```
 
-### Descripcion de cada servicio
+### Service descriptions
 
-| Servicio | Descripcion |
+| Service | Description |
 |---|---|
-| **postgres** | Instancia PostgreSQL 16 compartida. Aloja la base de datos de la aplicacion (`POSTGRES_DB`), la base de datos de metadatos de Airflow (`AIRFLOW_DB_NAME`) y la base de datos de analytics de dbt (`DBT_DB_NAME`). Las dos ultimas se crean automaticamente mediante `init-db.sh` en el primer arranque. |
-| **valkey** | Broker de mensajes Valkey 9.0.2 (fork open-source de Redis bajo licencia BSD). Actua como cola de tareas entre el scheduler y los workers cuando se usa `CeleryExecutor`. Solo expone el puerto `6379` dentro de la red interna de Docker (no accesible desde el host). Protegido con password, persistencia AOF habilitada y limite de memoria configurable. Compatible al 100% con el protocolo Redis. |
-| **airflow-apiserver** | Sirve la interfaz web de Airflow y la REST API v2. Es el punto de entrada principal para los usuarios y para la comunicacion interna con los workers via la Execution API. |
-| **airflow-scheduler** | Monitoriza todos los DAGs y sus tareas. Decide cuando una tarea esta lista para ejecutarse (dependencias cumplidas, horario alcanzado) y la encola en Valkey para que un worker la recoja. |
-| **airflow-dag-processor** | Proceso dedicado (nuevo en Airflow 3.x) que parsea los ficheros Python del directorio `dags/` y los registra en la base de datos. En Airflow 2.x esta responsabilidad la tenia el scheduler directamente. |
-| **airflow-worker** | Worker Celery que ejecuta las tareas encoladas. Puede escalarse horizontalmente (`docker compose up -d --scale airflow-worker=3`) para aumentar el paralelismo. |
-| **airflow-triggerer** | Gestiona tareas deferibles (*deferrable operators*). Ejecuta bucles de eventos asincronos que esperan condiciones externas (por ejemplo, que un job en un servicio externo termine) sin ocupar un slot del worker. |
-| **airflow-init** | Servicio de un solo uso que se ejecuta antes que el resto. Migra el esquema de la base de datos, crea el usuario administrador de la UI y verifica que el host tiene recursos suficientes (RAM, CPU, disco). |
-| **airflow-cli** | Contenedor auxiliar para ejecutar comandos `airflow` ad-hoc. Solo se levanta bajo el profile `debug` (`docker compose --profile debug run airflow-cli <comando>`). |
-| **flower** | Dashboard web para monitorizar los workers Celery en tiempo real (tareas activas, completadas, fallidas, tiempos). Solo se levanta bajo el profile `flower`. |
-| **dbt** | dbt-postgres 1.9.0 para transformaciones de datos. Servicio one-shot que se ejecuta bajo el profile `dbt` mediante `docker compose --profile dbt run --rm dbt <comando>`. Conecta a la base de datos `analytics` dedicada, separada de la aplicacion y de Airflow. |
+| **postgres** | Shared PostgreSQL 16 instance. Hosts the application database (`POSTGRES_DB`), Airflow metadata database (`AIRFLOW_DB_NAME`), and dbt analytics database (`DBT_DB_NAME`). The latter two are auto-created by `init-db.sh` on first boot. |
+| **valkey** | Valkey 9.0.2 message broker (open-source Redis fork, BSD licensed). Acts as the Celery task queue between the scheduler and workers. Internal-only (not exposed to host). Password-protected, AOF persistence enabled, configurable memory limit. 100% Redis protocol compatible. |
+| **airflow-apiserver** | Serves the Airflow web UI and REST API v2. Main entry point for users and for internal worker communication via the Execution API. |
+| **airflow-scheduler** | Monitors all DAGs and their tasks. Determines when a task is ready (dependencies met, schedule reached) and enqueues it in Valkey for a worker to pick up. |
+| **airflow-dag-processor** | Dedicated process (new in Airflow 3.x) that parses Python files from `dags/` and registers them in the database. In Airflow 2.x this was handled by the scheduler directly. |
+| **airflow-worker** | Celery worker that executes queued tasks. Can be scaled horizontally (`docker compose up -d --scale airflow-worker=3`). |
+| **airflow-triggerer** | Manages deferrable operators. Runs async event loops that wait for external conditions without occupying a worker slot. |
+| **airflow-init** | One-shot service that runs before everything else. Migrates the database schema, creates the admin user, and checks host resources (RAM, CPU, disk). |
+| **airflow-cli** | Helper container for running ad-hoc `airflow` commands. Only starts under the `debug` profile. |
+| **flower** | Web dashboard for real-time Celery worker monitoring. Only starts under the `flower` profile. |
+| **dbt** | dbt-postgres 1.9.0 for data transformations. One-shot service under the `dbt` profile via `docker compose --profile dbt run --rm dbt <command>`. Connects to the dedicated `analytics` database. |
 
-## Variables de entorno
+## Environment variables
 
-Todas las variables se definen en el fichero `.env` (partir de `.env.example`). A continuacion se documenta cada una agrupada por contexto.
+All variables are defined in `.env` (copy from `.env.example`). Airflow config can be overridden via `AIRFLOW__<SECTION>__<KEY>` environment variables, which take precedence over `config/airflow.cfg`.
+
+On Linux, set `AIRFLOW_UID=$(id -u)` in `.env` to match host user permissions on mounted volumes. macOS/Windows can use the default (`50000`).
 
 ### PostgreSQL
 
-Variables consumidas directamente por la imagen oficial de PostgreSQL.
-
-| Variable | Valor por defecto | Descripcion |
+| Variable | Default | Description |
 |---|---|---|
-| `POSTGRES_USER` | `app` | Nombre del superusuario de PostgreSQL. Se crea al inicializar el contenedor por primera vez. Este usuario es el propietario de la base de datos principal de la aplicacion. |
-| `POSTGRES_PASSWORD` | `changeme` | Contrasena del superusuario de PostgreSQL. **Debe cambiarse** en cualquier entorno que no sea desarrollo local. |
-| `POSTGRES_DB` | `app` | Nombre de la base de datos principal que PostgreSQL crea al arrancar. Destinada a la aplicacion (no a Airflow). |
-| `POSTGRES_PORT` | `5432` | Puerto del host mapeado al puerto 5432 del contenedor. Permite conectarse a PostgreSQL desde el host (por ejemplo con `psql` o un IDE de BD). |
+| `POSTGRES_USER` | `app` | PostgreSQL superuser name. Created on first container initialisation. |
+| `POSTGRES_PASSWORD` | `changeme` | PostgreSQL superuser password. **Must be changed** in any non-local environment. |
+| `POSTGRES_DB` | `app` | Main application database created on startup. |
+| `POSTGRES_PORT` | `5432` | Host port mapped to the container's 5432. |
 
 ### Valkey
 
-Variables para configurar el broker de mensajes.
-
-| Variable | Valor por defecto | Descripcion |
+| Variable | Default | Description |
 |---|---|---|
-| `VALKEY_PASSWORD` | `changeme` | Contrasena de autenticacion de Valkey. Se inyecta tanto en el `--requirepass` del servidor como en la `BROKER_URL` de Celery. **Debe cambiarse** en cualquier entorno que no sea desarrollo local. |
-| `VALKEY_IMAGE_NAME` | `valkey/valkey:9.0.2` | Imagen Docker de Valkey. Permite fijar o actualizar la version sin modificar el `docker-compose.yml`. |
-| `VALKEY_MAXMEMORY` | `256mb` | Limite maximo de memoria que Valkey puede usar. La politica de eviccion esta fijada a `noeviction`, lo que significa que Valkey rechazara escrituras cuando se alcance el limite en lugar de eliminar claves. Esto es lo recomendado para brokers de mensajes, ya que perder mensajes de la cola seria peor que rechazar temporalmente nuevas tareas. |
+| `VALKEY_PASSWORD` | `changeme` | Valkey authentication password. Injected into both the server `--requirepass` and Celery's `BROKER_URL`. |
+| `VALKEY_IMAGE_NAME` | `valkey/valkey:9.0.2` | Docker image for Valkey. |
+| `VALKEY_MAXMEMORY` | `256mb` | Maximum memory. Policy is `noeviction`: rejects writes at limit instead of dropping keys. |
 
-### Base de datos de Airflow
+### Airflow database
 
-Estas variables alimentan el script `init-db.sh` y las cadenas de conexion de Airflow.
-
-| Variable | Valor por defecto | Descripcion |
+| Variable | Default | Description |
 |---|---|---|
-| `AIRFLOW_DB_USER` | `airflow` | Rol de PostgreSQL dedicado para Airflow. Se crea automaticamente via `init-db.sh` en el primer arranque del contenedor postgres. Mantenerlo separado de `POSTGRES_USER` sigue el principio de minimo privilegio. |
-| `AIRFLOW_DB_PASSWORD` | `airflow` | Contrasena del rol `AIRFLOW_DB_USER`. **Debe cambiarse** en entornos no locales. |
-| `AIRFLOW_DB_NAME` | `airflow` | Base de datos donde Airflow almacena sus metadatos (DAGs, ejecuciones, tareas, conexiones, variables, logs de eventos, etc.). Se crea automaticamente via `init-db.sh`. |
+| `AIRFLOW_DB_USER` | `airflow` | Dedicated PostgreSQL role for Airflow. Auto-created via `init-db.sh`. |
+| `AIRFLOW_DB_PASSWORD` | `airflow` | Password for `AIRFLOW_DB_USER`. **Must be changed** in non-local environments. |
+| `AIRFLOW_DB_NAME` | `airflow` | Database for Airflow metadata (DAGs, runs, tasks, connections, variables). |
 
 ### dbt
 
-Variables que configuran la conexion de dbt a PostgreSQL. Se inyectan en el contenedor y son leidas por `profiles.yml` via `env_var()`.
-
-| Variable | Valor por defecto | Descripcion |
+| Variable | Default | Description |
 |---|---|---|
-| `DBT_DB_USER` | `dbt` | Rol de PostgreSQL dedicado para dbt. Se crea automaticamente via `init-db.sh` en el primer arranque. Separado de los demas usuarios por principio de minimo privilegio. |
-| `DBT_DB_PASSWORD` | `changeme` | Contrasena del rol `DBT_DB_USER`. **Debe cambiarse** en entornos no locales. |
-| `DBT_DB_NAME` | `analytics` | Base de datos donde dbt gestiona las transformaciones (warehouse). Separada de la BD de aplicacion y de Airflow siguiendo el patron ELT estandar. |
-| `DBT_SCHEMA` | `public` | Schema por defecto donde dbt materializa los modelos. Puede cambiarse para organizar los modelos en schemas distintos (ej. `staging`, `marts`). |
+| `DBT_DB_USER` | `dbt` | Dedicated PostgreSQL role for dbt. Auto-created via `init-db.sh`. |
+| `DBT_DB_PASSWORD` | `changeme` | Password for `DBT_DB_USER`. |
+| `DBT_DB_NAME` | `analytics` | Database where dbt materialises models. Separate from app and Airflow databases. |
+| `DBT_SCHEMA` | `public` | Default schema for dbt models. |
 
-### Airflow - Configuracion general
+### Airflow general
 
-| Variable | Valor por defecto | Descripcion |
+| Variable | Default | Description |
 |---|---|---|
-| `AIRFLOW_UID` | `50000` | UID del usuario que ejecuta los procesos dentro de los contenedores de Airflow. En Linux debe coincidir con el UID del usuario del host (`id -u`) para evitar problemas de permisos en los volumenes montados. En macOS/Windows se puede dejar el valor por defecto. |
-| `AIRFLOW_IMAGE_NAME` | `apache/airflow:3.1.7` | Imagen Docker usada para todos los servicios de Airflow. Permite cambiar a una imagen custom (por ejemplo, una extendida con dependencias adicionales) sin modificar el `docker-compose.yml`. |
-| `AIRFLOW_API_PORT` | `8080` | Puerto del host mapeado a la API/UI de Airflow. Cambiar si hay conflicto con otro servicio en el puerto 8080. |
-| `AIRFLOW_FERNET_KEY` | *(vacio)* | Clave de encriptacion simetrica (Fernet) que Airflow usa para cifrar valores sensibles almacenados en la base de datos (contrasenas en Connections, Variables marcadas como secretas). Si se deja vacia, Airflow genera una automaticamente, pero **debe fijarse en produccion** para que los datos cifrados sobrevivan a reinicios. Generar con: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. |
-| `AIRFLOW_WWW_USER` | `airflow` | Nombre de usuario del administrador de la interfaz web. Se crea durante `airflow-init`. |
-| `AIRFLOW_WWW_PASSWORD` | `airflow` | Contrasena del administrador de la interfaz web. **Debe cambiarse** en cualquier entorno expuesto. |
+| `AIRFLOW_UID` | `50000` | UID for container processes. Must match host UID on Linux. |
+| `AIRFLOW_IMAGE_NAME` | `apache/airflow:3.1.7` | Docker image for all Airflow services. |
+| `AIRFLOW_API_PORT` | `8080` | Host port for Airflow UI/API. |
+| `AIRFLOW_FERNET_KEY` | *(empty)* | Symmetric encryption key for sensitive values in the Airflow database. Auto-generated if empty; **must be set in production**. |
+| `AIRFLOW_WWW_USER` | `airflow` | Admin username for the web UI. |
+| `AIRFLOW_WWW_PASSWORD` | `airflow` | Admin password for the web UI. **Must be changed** in exposed environments. |
 
-### Airflow - Configuracion interna (docker-compose.yml)
-
-Estas variables estan definidas directamente en el `docker-compose.yml` dentro del bloque `x-airflow-common`. Usan la convencion de Airflow `AIRFLOW__<SECCION>__<CLAVE>` que permite sobreescribir cualquier parametro de `airflow.cfg` mediante variables de entorno.
-
-| Variable | Valor | Descripcion |
-|---|---|---|
-| `AIRFLOW__CORE__EXECUTOR` | `CeleryExecutor` | Define el motor de ejecucion de tareas. `CeleryExecutor` distribuye las tareas a traves de Valkey a uno o mas workers, permitiendo ejecucion paralela y escalado horizontal. Alternativas: `LocalExecutor` (un solo contenedor, sin Valkey ni workers) o `KubernetesExecutor` (un pod por tarea). |
-| `AIRFLOW__CORE__AUTH_MANAGER` | `airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager` | Gestor de autenticacion y autorizacion de la UI. FAB (Flask-AppBuilder) Auth Manager es el gestor por defecto en Airflow 3.x. Controla login, roles (Admin, Viewer, User, Op) y permisos sobre DAGs y conexiones. |
-| `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` | `postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@postgres/${AIRFLOW_DB_NAME}` | Cadena de conexion SQLAlchemy a la base de datos de metadatos. Airflow la usa para almacenar el estado de DAGs, tareas, ejecuciones, XComs, conexiones y variables. El driver `psycopg2` es el recomendado para PostgreSQL. |
-| `AIRFLOW__CELERY__RESULT_BACKEND` | `db+postgresql://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@postgres/${AIRFLOW_DB_NAME}` | Backend donde Celery almacena los resultados de las tareas ejecutadas. Usa la misma base de datos de Airflow para simplificar la arquitectura. Permite al scheduler consultar el estado final de cada tarea. |
-| `AIRFLOW__CELERY__BROKER_URL` | `redis://:${VALKEY_PASSWORD}@valkey:6379/0` | URL del broker de mensajes Celery. Incluye la contrasena de Valkey inyectada desde `VALKEY_PASSWORD`. El esquema `redis://` se mantiene porque Valkey es compatible con el protocolo Redis. Valkey actua como cola FIFO: el scheduler encola las tareas y los workers las consumen. La base de datos `0` se usa por defecto; pueden usarse otras (ej. `/1`, `/2`) si Valkey se comparte con otros servicios. |
-| `AIRFLOW__CORE__FERNET_KEY` | `${AIRFLOW_FERNET_KEY:-}` | Clave Fernet inyectada desde la variable de entorno del `.env`. Ver la descripcion de `AIRFLOW_FERNET_KEY` arriba. |
-| `AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION` | `true` | Cuando Airflow detecta un DAG nuevo, lo registra en estado **pausado**. Esto evita ejecuciones involuntarias de DAGs recien desplegados. El usuario debe activar cada DAG manualmente desde la UI o la API. |
-| `AIRFLOW__CORE__LOAD_EXAMPLES` | `false` | Controla si Airflow carga los DAGs de ejemplo incluidos en la imagen. Se desactiva para mantener la interfaz limpia y evitar confusiones con los DAGs reales del proyecto. |
-| `AIRFLOW__CORE__EXECUTION_API_SERVER_URL` | `http://airflow-apiserver:8080/execution/` | URL interna que los workers y el triggerer usan para comunicarse con el API Server via la Execution API (nuevo en Airflow 3.x). Esta API reemplaza el acceso directo a la base de datos desde los workers, mejorando el aislamiento y la seguridad. |
-| `AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK` | `true` | Habilita un servidor HTTP ligero en el scheduler (puerto 8974) que responde a peticiones de healthcheck. Docker Compose lo usa para verificar que el scheduler esta vivo y reiniciarlo si deja de responder. |
-| `AIRFLOW_CONFIG` | `/opt/airflow/config/airflow.cfg` | Ruta al fichero de configuracion de Airflow dentro del contenedor. Se monta desde el directorio local `config/`. Si no existe, Airflow genera uno con valores por defecto durante `airflow-init`. Las variables de entorno `AIRFLOW__*` siempre tienen precedencia sobre este fichero. |
-| `_PIP_ADDITIONAL_REQUIREMENTS` | *(vacio)* | Paquetes pip adicionales que se instalan al arrancar cada contenedor. Util para pruebas rapidas (ej. `apache-airflow-providers-google==10.0.0`). **No recomendado para produccion**: al ejecutarse en cada arranque, ralentiza el inicio. En su lugar, crear una imagen custom con un `Dockerfile`. |
-| `DUMB_INIT_SETSID` | `0` | Solo se aplica al worker. Controla como `dumb-init` (el proceso init del contenedor) propaga las senales. Con valor `0`, las senales se envian solo al proceso hijo directo (Celery) en lugar de a todo el grupo de procesos. Esto permite un *graceful shutdown* del worker: Celery termina las tareas en curso antes de apagarse. |
-| `_AIRFLOW_DB_MIGRATE` | `true` | Solo en `airflow-init`. Indica al entrypoint que ejecute `airflow db migrate` para crear/actualizar las tablas del esquema de metadatos. |
-| `_AIRFLOW_WWW_USER_CREATE` | `true` | Solo en `airflow-init`. Indica al entrypoint que cree el usuario administrador de la UI si no existe. |
-| `CONNECTION_CHECK_MAX_COUNT` | `0` | Solo en `airflow-cli`. Numero maximo de reintentos para comprobar la conexion a la base de datos al arrancar. Con `0` se desactiva la comprobacion, ya que el CLI se usa de forma puntual y no necesita esperar a que la BD este lista. |
-
-### Variables opcionales
-
-| Variable | Valor por defecto | Descripcion |
-|---|---|---|
-| `AIRFLOW_PROJ_DIR` | `.` (directorio actual) | Ruta base en el host desde la que se montan los directorios `dags/`, `logs/`, `config/` y `plugins/`. Util si los ficheros del proyecto estan en un directorio distinto al del `docker-compose.yml`. |
-| `FLOWER_PORT` | `5555` | Puerto del host mapeado a la UI de Flower. Solo relevante si se activa el profile `flower`. |
-
-## Estructura de directorios
-
-```
-.
-├── docker-compose.yml     # Definicion de todos los servicios
-├── init-db.sh            # Crea las BDs y usuarios de Airflow y dbt en Postgres
-├── .env.example           # Plantilla de variables de entorno
-├── .env                   # Variables reales (no versionado)
-├── dags/                  # Ficheros Python con las definiciones de DAGs
-├── logs/                  # Logs de ejecucion (no versionado)
-├── config/                # Configuracion custom de Airflow (airflow.cfg)
-├── plugins/               # Plugins custom de Airflow (operators, hooks, etc.)
-└── dbt/                   # Proyecto dbt
-    ├── dbt_project.yml    # Configuracion del proyecto dbt
-    ├── profiles.yml       # Conexion a PostgreSQL (via variables de entorno)
-    ├── models/            # Modelos SQL/Python de transformacion
-    ├── seeds/             # Ficheros CSV para carga estatica
-    ├── macros/            # Macros Jinja reutilizables
-    └── tests/             # Tests custom de datos
-```
-
-## Comandos utiles
+## Directory structure
 
 ```bash
-# Ver logs de un servicio concreto
+.
+├── docker-compose.yml     # Service definitions
+├── init-db.sh             # Creates Airflow and dbt databases/roles in PostgreSQL
+├── .env.example           # Environment variable template
+├── .env                   # Actual environment variables (not versioned)
+├── data/                  # Source CSV files
+│   └── customer_transactions.csv
+├── dags/                  # Airflow DAG definitions
+│   └── customer_transactions_pipeline.py
+├── logs/                  # Runtime logs (not versioned)
+├── config/                # Custom Airflow configuration (airflow.cfg)
+├── plugins/               # Custom Airflow operators, hooks, sensors
+└── dbt/                   # dbt project
+    ├── dbt_project.yml    # Project configuration
+    ├── profiles.yml       # PostgreSQL connection (via env vars)
+    ├── models/
+    │   ├── staging/       # Data cleaning and normalisation
+    │   └── marts/         # Dimensional model and aggregations
+    ├── seeds/             # Static CSV data for seeding
+    ├── macros/            # Reusable Jinja macros
+    └── tests/             # Custom singular tests
+```
+
+## Useful commands
+
+```bash
+# View logs for a specific service
 docker compose logs -f airflow-scheduler
 
-# Ejecutar un comando Airflow ad-hoc
+# Run an ad-hoc Airflow CLI command
 docker compose --profile debug run --rm airflow-cli airflow dags list
 
-# Escalar workers horizontalmente
+# Scale workers horizontally
 docker compose up -d --scale airflow-worker=3
 
-# Activar Flower para monitorizar Celery
+# Enable Flower for Celery monitoring
 docker compose --profile flower up -d
 
-# dbt — verificar conexion
+# dbt — verify connection
 docker compose --profile dbt run --rm dbt debug
 
-# dbt — ejecutar modelos
+# dbt — run models
 docker compose --profile dbt run --rm dbt run
 
-# dbt — ejecutar tests de datos
+# dbt — run tests
 docker compose --profile dbt run --rm dbt test
 
-# dbt — generar documentacion
+# dbt — generate docs
 docker compose --profile dbt run --rm dbt docs generate
 
-# Parar todos los servicios conservando los datos
+# Stop all services (preserve data)
 docker compose down
 
-# Parar y eliminar todos los datos (volumenes)
+# Stop and destroy all data (volumes)
 docker compose down -v
 ```
