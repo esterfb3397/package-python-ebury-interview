@@ -1,0 +1,72 @@
+version: 2
+
+models:
+  - name: dim_table
+    description: "Product dimension — deduplicated catalogue"
+    columns:
+      - name: product_id
+        description: "Product ID (PK)"
+        tests:
+          - unique
+          - not_null
+      - name: product_name
+        description: "Product name"
+        tests:
+          - not_null
+
+  - name: fact_table
+    description: "Transaction facts with calculated metrics"
+    columns:
+      - name: transaction_id
+        description: "Transaction ID (PK)"
+        tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: "Customer ID (may be NULL)"
+      - name: product_id
+        description: "Product ID (FK to dim_table)"
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_table')
+              field: product_id
+      - name: transaction_date
+        description: "Transaction date"
+        tests:
+          - not_null
+      - name: transaction_month
+        description: "First day of the month (for monthly aggregations)"
+        tests:
+          - not_null
+      - name: total_amount
+        description: "(price * quantity) + tax"
+        tests:
+          - not_null
+
+  - name: agg_monthly_summary
+    description: "Monthly transaction summary — revenue, tax, average ticket"
+    columns:
+      - name: transaction_month
+        description: "First day of the month"
+        tests:
+          - unique
+          - not_null
+      - name: total_transactions
+        tests:
+          - not_null
+      - name: total_revenue
+        tests:
+          - not_null
+
+  - name: agg_customer_summary
+    description: "Customer summary — revenue, products, first and last purchase"
+    columns:
+      - name: customer_id
+        description: "Customer ID"
+        tests:
+          - unique
+          - not_null
+      - name: total_spent
+        tests:
+          - not_null

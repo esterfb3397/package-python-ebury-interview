@@ -1,0 +1,38 @@
+version: 2
+
+models:
+  - name: stg_customer_transactions
+    description: "Cleaned and normalised customer transactions"
+    columns:
+      - name: transaction_id
+        description: "Transaction ID (INTEGER, T prefix removed)"
+        tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: "Customer ID (INTEGER, may be NULL)"
+
+      - name: transaction_date
+        description: "Transaction date (DATE, normalised format)"
+        tests:
+          - not_null
+
+      - name: product_id
+        description: "Product ID (INTEGER, P prefix removed)"
+        tests:
+          - not_null
+
+      - name: product_name
+        description: "Product name"
+        tests:
+          - not_null
+
+      - name: quantity
+        description: "Quantity (INTEGER, may be NULL)"
+
+      - name: price
+        description: "Unit price (NUMERIC, may be NULL)"
+
+      - name: tax
+        description: "Tax amount (NUMERIC, may be NULL)"
