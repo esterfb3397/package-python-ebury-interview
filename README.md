@@ -83,12 +83,30 @@ The DAG is configured with `retries=2` and `retry_delay=1min` by default. Schedu
 ### Lineage
 
 ```mermaid
-graph TD
-    A[raw_customer_transactions\nsource · all TEXT] --> B[stg_customer_transactions\ncleaned · typed]
-    B --> C[dim_table\nproduct dimension]
-    B --> D[fact_table\ntransaction facts]
-    D --> E[agg_customer_summary]
-    D --> F[agg_monthly_summary]
+graph LR
+    subgraph Source
+        A[(raw_customer_transactions)]
+    end
+
+    subgraph Staging
+        B[stg_customer_transactions]
+    end
+
+    subgraph Dimensional
+        C[dim_table]
+        D[fact_table]
+    end
+
+    subgraph Aggregation
+        E[agg_customer_summary]
+        F[agg_monthly_summary]
+    end
+
+    A --> B
+    B --> C
+    B --> D
+    D --> E
+    D --> F
 ```
 
 ## Data quality
