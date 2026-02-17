@@ -28,6 +28,9 @@ docker compose ps
 
 # 6. Verify dbt connection
 docker compose --profile dbt run --rm dbt debug
+
+# 7. If needed to shut down the volumes
+docker compose down -v 
 ```
 
 Once running, access points are:
