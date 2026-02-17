@@ -35,11 +35,11 @@ docker compose down -v
 
 Once running, access points are:
 
-| Service | URL | Default credentials |
-|---|---|---|
-| Airflow UI / API | <http://localhost:8080> | `airflow` / `airflow` |
-| Flower (Celery monitoring) | <http://localhost:5555> | -- |
-| PostgreSQL | localhost:5432 | `app` / `changeme` |
+| Service | URL |
+|---|---|
+| Airflow UI / API | <http://localhost:8080> |
+| Flower (Celery monitoring) | <http://localhost:5555> |
+| PostgreSQL | localhost:5432 |
 
 > Flower does not start by default. Enable it with `docker compose --profile flower up -d`.
 
@@ -47,10 +47,9 @@ Once running, access points are:
 
 The pipeline is defined as a single Airflow DAG (`customer_transactions_pipeline`) with three sequential tasks:
 
-```bash
-
-ingest_csv_to_postgres  ──▶  dbt_run  ──▶  dbt_test
-
+```mermaid
+graph LR
+    A[ingest_csv_to_postgres] --> B[dbt_run] --> C[dbt_test]
 ```
 
 1. **ingest_csv_to_postgres** — Reads `data/customer_transactions.csv`, loads all columns as TEXT into PostgreSQL (`raw_customer_transactions`) using `COPY` for efficiency. Full-refresh (drop + recreate) on every run to guarantee idempotency.
@@ -83,13 +82,13 @@ The DAG is configured with `retries=2` and `retry_delay=1min` by default. Schedu
 
 ### Lineage
 
-```bash
-raw_customer_transactions (source, all TEXT)
-    └── stg_customer_transactions (cleaned, typed)
-            ├── dim_table (product dimension)
-            ├── fact_table (transaction facts)
-            │       ├── agg_customer_summary
-            │       └── agg_monthly_summary
+```mermaid
+graph TD
+    A[raw_customer_transactions\nsource · all TEXT] --> B[stg_customer_transactions\ncleaned · typed]
+    B --> C[dim_table\nproduct dimension]
+    B --> D[fact_table\ntransaction facts]
+    D --> E[agg_customer_summary]
+    D --> F[agg_monthly_summary]
 ```
 
 ## Data quality
@@ -143,33 +142,26 @@ Data quality is addressed at multiple levels:
 
 ## Service architecture
 
-```
-                ┌───────────────┐
-                │   PostgreSQL  │  Shared database instance
-                └──────┬────────┘
-                       │
-       ┌───────────────┼───────────────┐
-       │               │               │
- ┌─────▼─────┐  ┌─────▼──────┐  ┌─────▼──────┐
- │  Airflow   │  │  App DB    │  │ Analytics  │
- │  metadata  │  │ (POSTGRES_ │  │ (DBT_DB_   │
- │  (airflow) │  │  DB)       │  │  NAME)     │
- └─────┬──────┘  └────────────┘  └─────▲──────┘
-       │                               │
-       │         ┌────────┐            │
-       │         │ Valkey  │      ┌────┴─────┐
-       │         │ (broker)│      │   dbt    │
-       │         └────┬────┘      │  1.9.0   │
-       │              │           └──────────┘
- ┌─────▼──────────────▼──────────────────────────┐
- │              Airflow 3.1.7                     │
- │  ┌────────────┐  ┌───────────┐  ┌──────────┐  │
- │  │ API Server │  │ Scheduler │  │ DAG Proc │  │
- │  └────────────┘  └───────────┘  └──────────┘  │
- │  ┌────────────┐  ┌───────────┐  ┌──────────┐  │
- │  │   Worker   │  │ Triggerer │  │  Flower  │  │
- │  └────────────┘  └───────────┘  └──────────┘  │
- └────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    PG[(PostgreSQL\nShared instance)] --> AirflowDB[(Airflow metadata\nairflow)]
+    PG --> AppDB[(App DB\nPOSTGRES_DB)]
+    PG --> AnalyticsDB[(Analytics\nDBT_DB_NAME)]
+
+    AnalyticsDB <--> dbt[dbt 1.9.0]
+
+    Valkey[Valkey\nbroker] --> Airflow
+
+    AirflowDB --> Airflow
+
+    subgraph Airflow [Airflow 3.1.7]
+        APIServer[API Server]
+        Scheduler
+        DAGProc[DAG Processor]
+        Worker
+        Triggerer
+        Flower
+    end
 ```
 
 ### Service descriptions
