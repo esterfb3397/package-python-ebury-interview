@@ -143,16 +143,12 @@ Data quality is addressed at multiple levels:
 ## Service architecture
 
 ```mermaid
-graph TD
-    PG[(PostgreSQL\nShared instance)] --> AirflowDB[(Airflow metadata\nairflow)]
-    PG --> AppDB[(App DB\nPOSTGRES_DB)]
-    PG --> AnalyticsDB[(Analytics\nDBT_DB_NAME)]
-
-    AnalyticsDB <--> dbt[dbt 1.9.0]
-
-    Valkey[Valkey\nbroker] --> Airflow
-
-    AirflowDB --> Airflow
+graph LR
+    subgraph PostgreSQL [PostgreSQL 16]
+        AirflowDB[(airflow)]
+        AppDB[(app)]
+        AnalyticsDB[(analytics)]
+    end
 
     subgraph Airflow [Airflow 3.1.7]
         APIServer[API Server]
@@ -162,6 +158,14 @@ graph TD
         Triggerer
         Flower
     end
+
+    dbt[dbt 1.9.0]
+    Valkey[Valkey 9.0.2]
+
+    AirflowDB --- Airflow
+    Valkey --- Airflow
+    AnalyticsDB --- dbt
+    Worker -- executes --> dbt
 ```
 
 ### Service descriptions
