@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── 1. Lint & format ──────────────────────────────────────────────────────
+  quality:
+    name: Code quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Lint with ruff
+        run: uvx ruff check .
+
+      - name: Check formatting with ruff
+        run: uvx ruff format --check .
+
+  # ── 2. Unit tests ─────────────────────────────────────────────────────────
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        # Install only lightweight deps needed for unit tests.
+        # test_dag.py is excluded because it requires the full Airflow stack.
+        run: |
+          uv venv
+          uv pip install pytest pandas "psycopg[binary]"
+          uv pip install -e . --no-deps
+
+      - name: Run unit tests
+        run: uv run pytest tests/test_ingestion.py -v
+
+  # ── 3. Build ──────────────────────────────────────────────────────────────
+  build:
+    name: Build package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Build wheel and sdist
+        run: uv build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

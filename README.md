@@ -2,6 +2,21 @@
 
 End-to-end data pipeline that ingests raw transaction data from CSV, cleans and transforms it into a dimensional model using dbt, and orchestrates everything with Apache Airflow.
 
+## About this project
+
+This is a technical interview exercise that demonstrates a production-grade data engineering pipeline. The goal is to take a raw CSV of customer transactions, ingest it into PostgreSQL, apply a dimensional data model via dbt, and orchestrate the whole process with Airflow — all containerised with Docker Compose.
+
+**Stack:** Apache Airflow 3.x · dbt-postgres 1.9 · PostgreSQL 17 · Valkey (Redis-compatible broker) · Python 3.12 · uv
+
+**Key design choices at a glance:**
+
+- **ELT over ETL** — raw data lands as TEXT first; all transformation logic lives in versioned SQL (dbt), not in the ingestion script.
+- **src layout** — business logic is an installable Python package (`ebury_customer_transactions`), decoupled from Airflow DAG definitions.
+- **CeleryExecutor** — horizontal worker scaling out of the box (`--scale airflow-worker=N`).
+- **Full-refresh ingestion** — DROP + COPY on every run guarantees idempotency without incremental complexity.
+- **Multi-layer data quality** — psycopg3 COPY → dbt staging transforms → dbt schema tests → dbt singular tests, all enforced as the final DAG task.
+- **CI via GitHub Actions** — linting (`ruff`), unit tests (pytest, no Docker required), and package build run automatically on every push and pull request.
+
 ## Prerequisites
 
 - **Docker Engine** with at least 4 GB of RAM allocated (8 GB recommended).
