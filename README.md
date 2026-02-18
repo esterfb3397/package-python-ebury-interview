@@ -35,22 +35,21 @@ docker compose down -v
 
 Once running, access points are:
 
-| Service | URL | Default credentials |
-|---|---|---|
-| Airflow UI / API | <http://localhost:8080> | `airflow` / `airflow` |
-| Flower (Celery monitoring) | <http://localhost:5555> | -- |
-| PostgreSQL | localhost:5432 | `app` / `changeme` |
+| Service | URL |
+|---|---|
+| Airflow UI / API | <http://localhost:8080> |
+| Flower (Celery monitoring) | <http://localhost:5555> |
+| PostgreSQL | localhost:5432 |
 
-> Flower does not start by default. Enable it with `docker compose --profile flower up -d`.
+> **Nota sobre Celery y Flower:** La arquitectura usa `CeleryExecutor` con Valkey como broker, lo que permite escalar workers horizontalmente (`--scale airflow-worker=N`). Flower es el dashboard de monitorización de Celery en tiempo real (estado de workers, cola de tareas, historial). No se activa por defecto porque en un entorno de demo con un solo worker no es necesario, pero está preconfigurado para habilitarse con `docker compose --profile flower up -d` cuando se necesite monitorizar múltiples workers en producción.
 
 ## Pipeline overview
 
 The pipeline is defined as a single Airflow DAG (`customer_transactions_pipeline`) with three sequential tasks:
 
-```bash
-
-ingest_csv_to_postgres  ──▶  dbt_run  ──▶  dbt_test
-
+```mermaid
+graph LR
+    A[ingest_csv_to_postgres] --> B[dbt_run] --> C[dbt_test]
 ```
 
 1. **ingest_csv_to_postgres** — Reads `data/customer_transactions.csv`, loads all columns as TEXT into PostgreSQL (`raw_customer_transactions`) using `COPY` for efficiency. Full-refresh (drop + recreate) on every run to guarantee idempotency.
@@ -83,13 +82,31 @@ The DAG is configured with `retries=2` and `retry_delay=1min` by default. Schedu
 
 ### Lineage
 
-```bash
-raw_customer_transactions (source, all TEXT)
-    └── stg_customer_transactions (cleaned, typed)
-            ├── dim_table (product dimension)
-            ├── fact_table (transaction facts)
-            │       ├── agg_customer_summary
-            │       └── agg_monthly_summary
+```mermaid
+graph LR
+    subgraph Source
+        A[(raw_customer_transactions)]
+    end
+
+    subgraph Staging
+        B[stg_customer_transactions]
+    end
+
+    subgraph Dimensional
+        C[dim_table]
+        D[fact_table]
+    end
+
+    subgraph Aggregation
+        E[agg_customer_summary]
+        F[agg_monthly_summary]
+    end
+
+    A --> B
+    B --> C
+    B --> D
+    D --> E
+    D --> F
 ```
 
 ## Data quality
@@ -143,40 +160,37 @@ Data quality is addressed at multiple levels:
 
 ## Service architecture
 
-```
-                ┌───────────────┐
-                │   PostgreSQL  │  Shared database instance
-                └──────┬────────┘
-                       │
-       ┌───────────────┼───────────────┐
-       │               │               │
- ┌─────▼─────┐  ┌─────▼──────┐  ┌─────▼──────┐
- │  Airflow   │  │  App DB    │  │ Analytics  │
- │  metadata  │  │ (POSTGRES_ │  │ (DBT_DB_   │
- │  (airflow) │  │  DB)       │  │  NAME)     │
- └─────┬──────┘  └────────────┘  └─────▲──────┘
-       │                               │
-       │         ┌────────┐            │
-       │         │ Valkey  │      ┌────┴─────┐
-       │         │ (broker)│      │   dbt    │
-       │         └────┬────┘      │  1.9.0   │
-       │              │           └──────────┘
- ┌─────▼──────────────▼──────────────────────────┐
- │              Airflow 3.1.7                     │
- │  ┌────────────┐  ┌───────────┐  ┌──────────┐  │
- │  │ API Server │  │ Scheduler │  │ DAG Proc │  │
- │  └────────────┘  └───────────┘  └──────────┘  │
- │  ┌────────────┐  ┌───────────┐  ┌──────────┐  │
- │  │   Worker   │  │ Triggerer │  │  Flower  │  │
- │  └────────────┘  └───────────┘  └──────────┘  │
- └────────────────────────────────────────────────┘
+```mermaid
+graph LR
+    subgraph PostgreSQL [PostgreSQL 17.6]
+        AirflowDB[(airflow)]
+        AppDB[(app)]
+        AnalyticsDB[(analytics)]
+    end
+
+    subgraph Airflow [Airflow 3.1.7]
+        APIServer[API Server]
+        Scheduler
+        DAGProc[DAG Processor]
+        Worker
+        Triggerer
+        Flower
+    end
+
+    dbt[dbt 1.9.0]
+    Valkey[Valkey 9.0.2]
+
+    AirflowDB --- Airflow
+    Valkey --- Airflow
+    AnalyticsDB --- dbt
+    Worker -- executes --> dbt
 ```
 
 ### Service descriptions
 
 | Service | Description |
 |---|---|
-| **postgres** | Shared PostgreSQL 16 instance. Hosts the application database (`POSTGRES_DB`), Airflow metadata database (`AIRFLOW_DB_NAME`), and dbt analytics database (`DBT_DB_NAME`). The latter two are auto-created by `init-db.sh` on first boot. |
+| **postgres** | Shared PostgreSQL 17.6 instance. Hosts the application database (`POSTGRES_DB`), Airflow metadata database (`AIRFLOW_DB_NAME`), and dbt analytics database (`DBT_DB_NAME`). The latter two are auto-created by `init-db.sh` on first boot. |
 | **valkey** | Valkey 9.0.2 message broker (open-source Redis fork, BSD licensed). Acts as the Celery task queue between the scheduler and workers. Internal-only (not exposed to host). Password-protected, AOF persistence enabled, configurable memory limit. 100% Redis protocol compatible. |
 | **airflow-apiserver** | Serves the Airflow web UI and REST API v2. Main entry point for users and for internal worker communication via the Execution API. |
 | **airflow-scheduler** | Monitors all DAGs and their tasks. Determines when a task is ready (dependencies met, schedule reached) and enqueues it in Valkey for a worker to pick up. |
@@ -267,12 +281,11 @@ On Linux, set `AIRFLOW_UID=$(id -u)` in `.env` to match host user permissions on
 
 ## Useful commands
 
-```bash
-# View logs for a specific service
-docker compose logs -f airflow-scheduler
+### Docker Compose
 
-# Run an ad-hoc Airflow CLI command
-docker compose --profile debug run --rm airflow-cli airflow dags list
+```bash
+# View real-time logs for a specific service
+docker compose logs -f airflow-scheduler
 
 # Scale workers horizontally
 docker compose up -d --scale airflow-worker=3
@@ -280,21 +293,61 @@ docker compose up -d --scale airflow-worker=3
 # Enable Flower for Celery monitoring
 docker compose --profile flower up -d
 
-# dbt — verify connection
-docker compose --profile dbt run --rm dbt debug
+# Check resource usage per container
+docker compose top
 
-# dbt — run models
-docker compose --profile dbt run --rm dbt run
-
-# dbt — run tests
-docker compose --profile dbt run --rm dbt test
-
-# dbt — generate docs
-docker compose --profile dbt run --rm dbt docs generate
+# Restart a single service without downtime
+docker compose restart airflow-worker
 
 # Stop all services (preserve data)
 docker compose down
+```
 
-# Stop and destroy all data (volumes)
-docker compose down -v
+### Airflow
+
+```bash
+# List all registered DAGs
+docker compose --profile debug run --rm airflow-cli airflow dags list
+
+# Trigger a DAG run manually
+docker compose --profile debug run --rm airflow-cli airflow dags trigger customer_transactions_pipeline
+
+# Check task status for a specific DAG run
+docker compose --profile debug run --rm airflow-cli airflow tasks states-for-dag-run customer_transactions_pipeline <run_id>
+
+# List active Airflow connections
+docker compose --profile debug run --rm airflow-cli airflow connections list
+```
+
+### dbt
+
+```bash
+# Run all models
+docker compose --profile dbt run --rm dbt run
+
+# Run a specific model and its downstream dependencies
+docker compose --profile dbt run --rm dbt run --select fact_table+
+
+# Run tests
+docker compose --profile dbt run --rm dbt test
+
+# Generate and serve documentation (lineage graph included)
+docker compose --profile dbt run --rm dbt docs generate
+docker compose --profile dbt run --rm dbt docs serve --port 8081
+
+# Show compiled SQL for a model
+docker compose --profile dbt run --rm dbt show --select fact_table
+```
+
+### PostgreSQL
+
+```bash
+# Connect to the analytics database
+docker compose exec postgres psql -U dbt -d analytics
+
+# Quick row count on a table
+docker compose exec postgres psql -U dbt -d analytics -c "SELECT COUNT(*) FROM fact_table;"
+
+# List all tables in the analytics database
+docker compose exec postgres psql -U dbt -d analytics -c "\dt"
 ```
