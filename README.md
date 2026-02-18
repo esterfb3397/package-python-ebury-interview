@@ -17,21 +17,26 @@ cp .env.example .env
 # 2. (Linux only) Set the host user UID
 echo "AIRFLOW_UID=$(id -u)" >> .env
 
-# 3. Initialise the database and create the admin user
+# 3. Build the custom Airflow image (installs Python dependencies)
+docker compose build
+
+# 4. Initialise the database and create the admin user
 docker compose up airflow-init
 
-# 4. Start all services
+# 5. Start all services
 docker compose up -d
 
-# 5. Verify services are healthy
+# 6. Verify services are healthy
 docker compose ps
 
-# 6. Verify dbt connection
+# 7. Verify dbt connection
 docker compose --profile dbt run --rm dbt debug
 
-# 7. If needed to shut down the volumes
-docker compose down -v 
+# 8. If needed to shut down the volumes
+docker compose down -v
 ```
+
+> **Note:** Dependencies (pandas, dbt-postgres, psycopg, etc.) are baked into the Docker image at build time via `requirements.txt`. After the first build, restarts are instant. Only rebuild when dependencies change: `docker compose up -d --build`.
 
 Once running, access points are:
 
@@ -49,7 +54,7 @@ The pipeline is defined as a single Airflow DAG (`customer_transactions_pipeline
 
 ```mermaid
 graph LR
-    A[ingest_csv_to_postgres] --> B[dbt_run] --> C[dbt_test]
+    A["ingest_csv_to_postgres"] --> B["dbt_run"] --> C["dbt_test"]
 ```
 
 1. **ingest_csv_to_postgres** — Reads `data/customer_transactions.csv`, loads all columns as TEXT into PostgreSQL (`raw_customer_transactions`) using `COPY` for efficiency. Full-refresh (drop + recreate) on every run to guarantee idempotency.
@@ -85,21 +90,21 @@ The DAG is configured with `retries=2` and `retry_delay=1min` by default. Schedu
 ```mermaid
 graph LR
     subgraph Source
-        A[(raw_customer_transactions)]
+        A[("raw_customer_transactions")]
     end
 
     subgraph Staging
-        B[stg_customer_transactions]
+        B["stg_customer_transactions"]
     end
 
     subgraph Dimensional
-        C[dim_table]
-        D[fact_table]
+        C["dim_table"]
+        D["fact_table"]
     end
 
     subgraph Aggregation
-        E[agg_customer_summary]
-        F[agg_monthly_summary]
+        E["agg_customer_summary"]
+        F["agg_monthly_summary"]
     end
 
     A --> B
@@ -135,7 +140,7 @@ Data quality is addressed at multiple levels:
 
 - Text-to-number mappings (`"Two Hundred"`, `"Fifteen"`) are hardcoded for the known dataset. In production, this should be replaced by a lookup table or a more generic parsing macro.
 - Source freshness (`loaded_at_field`) is not yet configured. Adding it would enable alerting when data becomes stale.
-- Custom singular tests (e.g., `total_amount >= 0`, `transaction_date` within expected range) would add an extra validation layer.
+- ~~Custom singular tests (e.g., `total_amount >= 0`, `transaction_date` within expected range) would add an extra validation layer.~~ **Done** — see `dbt/tests/`.
 
 ## Data governance
 
@@ -162,28 +167,28 @@ Data quality is addressed at multiple levels:
 
 ```mermaid
 graph LR
-    subgraph PostgreSQL [PostgreSQL 17.6]
-        AirflowDB[(airflow)]
-        AppDB[(app)]
-        AnalyticsDB[(analytics)]
+    subgraph PostgreSQL ["PostgreSQL 17.6"]
+        AirflowDB[("airflow")]
+        AppDB[("app")]
+        AnalyticsDB[("analytics")]
     end
 
-    subgraph Airflow [Airflow 3.1.7]
-        APIServer[API Server]
+    subgraph Airflow ["Airflow 3.1.7"]
+        APIServer["API Server"]
         Scheduler
-        DAGProc[DAG Processor]
+        DAGProc["DAG Processor"]
         Worker
         Triggerer
         Flower
     end
 
-    dbt[dbt 1.9.0]
-    Valkey[Valkey 9.0.2]
+    dbt["dbt 1.9.0"]
+    Valkey["Valkey 9.0.2"]
 
     AirflowDB --- Airflow
     Valkey --- Airflow
     AnalyticsDB --- dbt
-    Worker -- executes --> dbt
+    Worker -- "executes" --> dbt
 ```
 
 ### Service descriptions
@@ -257,7 +262,9 @@ On Linux, set `AIRFLOW_UID=$(id -u)` in `.env` to match host user permissions on
 
 ```bash
 .
-├── docker-compose.yml     # Service definitions
+├── docker-compose.yml     # Service definitions (builds custom Airflow image inline)
+├── requirements.txt       # Python dependencies installed at Docker build time
+├── pyproject.toml         # Project metadata, dev dependencies (pytest, ruff)
 ├── init-db.sh             # Creates Airflow and dbt databases/roles in PostgreSQL
 ├── .env.example           # Environment variable template
 ├── .env                   # Actual environment variables (not versioned)
@@ -265,6 +272,9 @@ On Linux, set `AIRFLOW_UID=$(id -u)` in `.env` to match host user permissions on
 │   └── customer_transactions.csv
 ├── dags/                  # Airflow DAG definitions
 │   └── customer_transactions_pipeline.py
+├── tests/                 # Python tests (DAG validation, ingestion logic)
+│   ├── test_dag.py
+│   └── test_ingestion.py
 ├── logs/                  # Runtime logs (not versioned)
 ├── config/                # Custom Airflow configuration (airflow.cfg)
 ├── plugins/               # Custom Airflow operators, hooks, sensors
@@ -276,14 +286,45 @@ On Linux, set `AIRFLOW_UID=$(id -u)` in `.env` to match host user permissions on
     │   └── marts/         # Dimensional model and aggregations
     ├── seeds/             # Static CSV data for seeding
     ├── macros/            # Reusable Jinja macros
-    └── tests/             # Custom singular tests
+    └── tests/             # Custom singular tests (business rule validation)
 ```
+
+## Testing
+
+### Python tests
+
+```bash
+# Install dev dependencies locally
+pip install -e ".[dev]"
+
+# Run all tests
+pytest
+
+# Run with verbose output
+pytest -v
+```
+
+Tests cover:
+
+- **DAG structure** (`tests/test_dag.py`): verifies task count, task IDs, dependency chain, tags, schedule, and default args.
+- **Ingestion logic** (`tests/test_ingestion.py`): verifies CSV is read as text, table is recreated (idempotency), and COPY is used for bulk loading. Uses mocks — no database required.
+
+### dbt tests
+
+dbt schema tests (unique, not_null, relationships) run automatically as the last DAG task. Additionally, singular tests in `dbt/tests/` validate business rules:
+
+- `assert_total_amount_is_non_negative` — no transaction should have a negative total.
+- `assert_quantity_is_positive` — quantity must be > 0 when present.
+- `assert_transaction_date_in_range` — dates must be between 2020 and today.
 
 ## Useful commands
 
 ### Docker Compose
 
 ```bash
+# Rebuild after changing dependencies (requirements.txt)
+docker compose up -d --build
+
 # View real-time logs for a specific service
 docker compose logs -f airflow-scheduler
 

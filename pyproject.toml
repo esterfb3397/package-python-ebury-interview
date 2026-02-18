@@ -1,0 +1,28 @@
+[project]
+name = "ebury-customer-transactions"
+version = "1.0.0"
+description = "Customer transactions analytics pipeline — Airflow + dbt + PostgreSQL"
+requires-python = ">=3.12"
+dependencies = [
+    "apache-airflow-providers-fab==3.3.0",
+    "pandas==3.0.0",
+    "psycopg[binary]==3.3.2",
+    "dbt-postgres==1.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["dags"]
