@@ -59,9 +59,7 @@ class CustomerTransactionsTasks:
                     with cur.copy("COPY raw_customer_transactions FROM STDIN WITH CSV") as copy:
                         copy.write(buffer.read())
 
-                    cur.execute(
-                        "SELECT COUNT(*) FROM raw_customer_transactions;"
-                    )
+                    cur.execute("SELECT COUNT(*) FROM raw_customer_transactions;")
                     count = cur.fetchone()[0]
         finally:
             conn.close()

@@ -7,7 +7,6 @@ import pandas as pd
 
 from ebury_customer_transactions import CustomerTransactionsTasks
 
-
 CSV_CONTENT = """\
 transaction_id,customer_id,transaction_date,product_id,product_name,quantity,price,tax
 1001,501.0,2023-07-11,101,Product A,1.0,76.27,8.23
@@ -73,9 +72,7 @@ def test_ingest_uses_copy():
     tasks, cursor, _, mock_copy = _make_tasks()
     tasks.ingest_csv_to_postgres()
 
-    cursor.copy.assert_called_once_with(
-        "COPY raw_customer_transactions FROM STDIN WITH CSV"
-    )
+    cursor.copy.assert_called_once_with("COPY raw_customer_transactions FROM STDIN WITH CSV")
     mock_copy.write.assert_called_once()
 
 

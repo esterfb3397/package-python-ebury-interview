@@ -15,7 +15,6 @@ from airflow.sdk import DAG, task
 
 from ebury_customer_transactions import CustomerTransactionsTasks
 
-
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
 DBT_CMD = f"dbt {{}} --project-dir {DBT_PROJECT_DIR} --profiles-dir {DBT_PROJECT_DIR}"
 
