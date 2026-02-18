@@ -1,0 +1,1 @@
+from ebury_customer_transactions.tasks import CustomerTransactionsTasks

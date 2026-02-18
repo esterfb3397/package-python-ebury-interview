@@ -17,7 +17,7 @@ cp .env.example .env
 # 2. (Linux only) Set the host user UID
 echo "AIRFLOW_UID=$(id -u)" >> .env
 
-# 3. Build the custom Airflow image (installs Python dependencies)
+# 3. Build the custom Airflow image (installs the project package and dependencies)
 docker compose build
 
 # 4. Initialise the database and create the admin user
@@ -36,7 +36,7 @@ docker compose --profile dbt run --rm dbt debug
 docker compose down -v
 ```
 
-> **Note:** Dependencies (pandas, dbt-postgres, psycopg, etc.) are baked into the Docker image at build time via `requirements.txt`. After the first build, restarts are instant. Only rebuild when dependencies change: `docker compose up -d --build`.
+> **Note:** The business logic lives in `src/ebury_customer_transactions/` and is installed as a Python package at build time via `pip install .` (reads `pyproject.toml`). Dependencies (pandas, dbt-postgres, psycopg, etc.) are baked into the image. After the first build, restarts are instant. Only rebuild when dependencies or `src/` code change: `docker compose up -d --build`.
 
 Once running, access points are:
 
@@ -263,14 +263,17 @@ On Linux, set `AIRFLOW_UID=$(id -u)` in `.env` to match host user permissions on
 ```bash
 .
 ├── docker-compose.yml     # Service definitions (builds custom Airflow image inline)
-├── requirements.txt       # Python dependencies installed at Docker build time
-├── pyproject.toml         # Project metadata, dev dependencies (pytest, ruff)
+├── pyproject.toml         # Package metadata, dependencies and build config
 ├── init-db.sh             # Creates Airflow and dbt databases/roles in PostgreSQL
 ├── .env.example           # Environment variable template
 ├── .env                   # Actual environment variables (not versioned)
 ├── data/                  # Source CSV files
 │   └── customer_transactions.csv
-├── dags/                  # Airflow DAG definitions
+├── src/                   # Installable Python package (src layout)
+│   └── ebury_customer_transactions/
+│       ├── __init__.py    # Re-exports CustomerTransactionsTasks
+│       └── tasks.py       # Business logic (CSV ingestion)
+├── dags/                  # Airflow DAG definitions (only orchestration)
 │   └── customer_transactions_pipeline.py
 ├── tests/                 # Python tests (DAG validation, ingestion logic)
 │   ├── test_dag.py
@@ -294,15 +297,17 @@ On Linux, set `AIRFLOW_UID=$(id -u)` in `.env` to match host user permissions on
 ### Python tests
 
 ```bash
-# Install dev dependencies locally
-pip install -e ".[dev]"
+# Install the package and dev dependencies locally (using uv)
+uv sync --extra dev
 
 # Run all tests
-pytest
+uv run pytest
 
 # Run with verbose output
-pytest -v
+uv run pytest -v
 ```
+
+> Alternatively, without uv: `pip install -e ".[dev]"` and then `pytest -v`.
 
 Tests cover:
 
@@ -322,7 +327,7 @@ dbt schema tests (unique, not_null, relationships) run automatically as the last
 ### Docker Compose
 
 ```bash
-# Rebuild after changing dependencies (requirements.txt)
+# Rebuild after changing dependencies or src/ code
 docker compose up -d --build
 
 # View real-time logs for a specific service
