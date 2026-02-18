@@ -10,8 +10,8 @@ Customer transactions pipeline:
 import os
 from datetime import datetime, timedelta
 
-from airflow.sdk import DAG, task
 from airflow.operators.bash import BashOperator
+from airflow.sdk import DAG, task
 
 from ebury_customer_transactions import CustomerTransactionsTasks
 

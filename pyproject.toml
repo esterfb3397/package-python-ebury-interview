@@ -27,5 +27,8 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["ebury_customer_transactions"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

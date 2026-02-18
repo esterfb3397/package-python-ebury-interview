@@ -1,1 +1,1 @@
-from ebury_customer_transactions.tasks import CustomerTransactionsTasks
+from ebury_customer_transactions.tasks import CustomerTransactionsTasks as CustomerTransactionsTasks
