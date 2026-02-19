@@ -153,7 +153,6 @@ Data quality is addressed at multiple levels:
 
 - Text-to-number mappings (`"Two Hundred"`, `"Fifteen"`) are hardcoded for the known dataset. In production, this should be replaced by a lookup table or a more generic parsing macro.
 - Source freshness (`loaded_at_field`) is not yet configured. Adding it would enable alerting when data becomes stale.
-- ~~Custom singular tests (e.g., `total_amount >= 0`, `transaction_date` within expected range) would add an extra validation layer.~~ **Done** — see `dbt/tests/`.
 
 ## Data governance
 
