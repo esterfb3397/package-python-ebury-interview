@@ -61,8 +61,6 @@ Once running, access points are:
 | Flower (Celery monitoring) | <http://localhost:5555> |
 | PostgreSQL | localhost:5432 |
 
-> **Nota sobre Celery y Flower:** La arquitectura usa `CeleryExecutor` con Valkey como broker, lo que permite escalar workers horizontalmente (`--scale airflow-worker=N`). Flower es el dashboard de monitorización de Celery en tiempo real (estado de workers, cola de tareas, historial). No se activa por defecto porque en un entorno de demo con un solo worker no es necesario, pero está preconfigurado para habilitarse con `docker compose --profile flower up -d` cuando se necesite monitorizar múltiples workers en producción.
-
 ## Pipeline overview
 
 The pipeline is defined as a single Airflow DAG (`customer_transactions_pipeline`) with three sequential tasks:
